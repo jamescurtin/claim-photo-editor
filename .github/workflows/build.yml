@@ -1,0 +1,79 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller
+
+      - name: Build macOS app
+        run: pyinstaller claim-photo-editor.spec
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "Claim Photo Editor" \
+            --volicon "resources/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Claim Photo Editor.app" 175 190 \
+            --hide-extension "Claim Photo Editor.app" \
+            --app-drop-link 425 190 \
+            "Claim-Photo-Editor.dmg" \
+            "dist/Claim Photo Editor.app" || true
+          # Fallback to zip if DMG creation fails (missing icon, etc.)
+          if [ ! -f "Claim-Photo-Editor.dmg" ]; then
+            cd dist && zip -r ../Claim-Photo-Editor-macOS.zip "Claim Photo Editor.app"
+          fi
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claim-Photo-Editor-macOS
+          path: |
+            Claim-Photo-Editor.dmg
+            Claim-Photo-Editor-macOS.zip
+          if-no-files-found: warn
+
+  release:
+    needs: build-macos
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Claim-Photo-Editor-macOS
+          path: ./artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/Claim-Photo-Editor.dmg
+            artifacts/Claim-Photo-Editor-macOS.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

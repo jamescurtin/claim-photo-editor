@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="64" fill="#2563eb"/>
+
+  <!-- Photo frame -->
+  <rect x="80" y="100" width="352" height="264" rx="16" fill="white" opacity="0.95"/>
+
+  <!-- Photo placeholder (mountain/sun scene) -->
+  <rect x="100" y="120" width="312" height="180" fill="#1e3a5f"/>
+
+  <!-- Sun -->
+  <circle cx="340" cy="180" r="35" fill="#fbbf24"/>
+
+  <!-- Mountains -->
+  <polygon points="100,300 200,200 280,280 100,300" fill="#3b82f6"/>
+  <polygon points="180,300 300,180 412,300 180,300" fill="#60a5fa"/>
+
+  <!-- Caption lines (representing text) -->
+  <rect x="100" y="315" width="200" height="12" rx="6" fill="#374151"/>
+  <rect x="100" y="335" width="150" height="12" rx="6" fill="#374151" opacity="0.6"/>
+
+  <!-- PDF badge -->
+  <rect x="340" y="380" width="90" height="50" rx="8" fill="#dc2626"/>
+  <text x="385" y="415" font-family="-apple-system, system-ui, Helvetica Neue, Helvetica, Arial" font-size="24" font-weight="bold" fill="white" text-anchor="middle">PDF</text>
+</svg>
