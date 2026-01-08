@@ -164,7 +164,7 @@ if sys.platform == 'darwin':
         bundle_identifier='com.jamescurtin.claim-photo-editor',
         info_plist={
             'CFBundleDisplayName': 'Claim Photo Editor',
-            'CFBundleShortVersionString': '0.1.0',
+            'CFBundleShortVersionString': '0.1.1',
             'NSHighResolutionCapable': True,
             'NSRequiresAquaSystemAppearance': False,
         },
