@@ -19,7 +19,10 @@
       "Bash(du -sh:*)",
       "Bash(find:*)",
       "Bash(xargs:*)",
-      "Bash(base=\"/Users/jamescurtin/repos/claim-photo-editor/dist/Claim Photo Editor.app/Contents/Frameworks/PySide6/Qt/lib\")"
+      "Bash(base=\"/Users/jamescurtin/repos/claim-photo-editor/dist/Claim Photo Editor.app/Contents/Frameworks/PySide6/Qt/lib\")",
+      "Bash(pip index:*)",
+      "Bash(pip search:*)",
+      "Bash(curl:*)"
     ]
   }
 }

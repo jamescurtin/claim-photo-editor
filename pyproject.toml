@@ -38,6 +38,8 @@ dev = [
     "mypy>=1.13.0",
     "types-requests>=2.32.0",
     "types-Pillow>=10.2.0",
+    "PySide6-stubs>=6.7.0",
+    "types-reportlab>=4.2.0",
 ]
 
 [project.scripts]
@@ -97,10 +99,6 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = [
     "piexif.*",
-    "reportlab.*",
-    "PySide6.*",
-    "PIL.*",
-    "requests.*",
 ]
 ignore_missing_imports = true
 

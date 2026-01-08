@@ -103,7 +103,7 @@ class ThumbnailCache:
             cache_key = self._get_cache_key(photo_path)
             thumb_path = self._get_thumbnail_path(cache_key)
             thumb_path.parent.mkdir(parents=True, exist_ok=True)
-            return pixmap.save(str(thumb_path), "PNG")
+            return bool(pixmap.save(str(thumb_path), "PNG"))
         except (OSError, ValueError):
             return False
 
