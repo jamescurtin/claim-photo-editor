@@ -15,7 +15,11 @@
       "Bash(python -m pytest:*)",
       "Bash(/opt/homebrew/bin/python3:*)",
       "Bash(open:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(du -sh:*)",
+      "Bash(find:*)",
+      "Bash(xargs:*)",
+      "Bash(base=\"/Users/jamescurtin/repos/claim-photo-editor/dist/Claim Photo Editor.app/Contents/Frameworks/PySide6/Qt/lib\")"
     ]
   }
 }

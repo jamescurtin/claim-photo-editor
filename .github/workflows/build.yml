@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14  # ARM64 (Apple Silicon) runner
     steps:
       - uses: actions/checkout@v4
 
