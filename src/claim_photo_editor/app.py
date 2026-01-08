@@ -42,7 +42,7 @@ def is_development_mode() -> bool:
 class UpdateWorker(QThread):
     """Background worker for checking updates."""
 
-    update_available = Signal(str, str)  # version, release_notes
+    update_available = Signal(str, str, object)  # version, release_notes, checker
     no_update = Signal()
     error = Signal(str)
 
@@ -56,7 +56,7 @@ class UpdateWorker(QThread):
             has_update, version = self.checker.check_for_updates()
             if has_update and version:
                 notes = self.checker.get_release_notes()
-                self.update_available.emit(version, notes)
+                self.update_available.emit(version, notes, self.checker)
             else:
                 self.no_update.emit()
         except Exception as e:
@@ -556,7 +556,7 @@ class MainWindow(QMainWindow):
         progress.close()
 
         if has_update and version:
-            self._on_update_available(version, checker.get_release_notes())
+            self._on_update_available(version, checker.get_release_notes(), checker)
         else:
             QMessageBox.information(
                 self,
@@ -564,7 +564,9 @@ class MainWindow(QMainWindow):
                 f"You are running the latest version ({__version__}).",
             )
 
-    def _on_update_available(self, version: str, _release_notes: str) -> None:
+    def _on_update_available(
+        self, version: str, _release_notes: str, checker: UpdateChecker
+    ) -> None:
         """Handle update available notification."""
         result = QMessageBox.question(
             self,
@@ -577,17 +579,15 @@ class MainWindow(QMainWindow):
         )
 
         if result == QMessageBox.StandardButton.Yes:
-            self._download_update()
+            self._download_update(checker)
 
-    def _download_update(self) -> None:
+    def _download_update(self, checker: UpdateChecker) -> None:
         """Download and install update."""
         progress = QProgressDialog(self)
         progress.setLabelText("Downloading update...")
         progress.setCancelButtonText("Cancel")
         progress.setRange(0, 100)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-
-        checker = UpdateChecker()
 
         def update_progress(received: int, total: int) -> None:
             if total > 0:
