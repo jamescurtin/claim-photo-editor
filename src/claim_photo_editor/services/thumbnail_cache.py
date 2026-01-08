@@ -107,7 +107,7 @@ class ThumbnailCache:
         except (OSError, ValueError):
             return False
 
-    def get_metadata(self, photo_path: Path) -> dict | None:
+    def get_metadata(self, photo_path: Path) -> dict[str, object] | None:
         """
         Get cached metadata for a photo.
 
@@ -123,7 +123,7 @@ class ThumbnailCache:
 
             if meta_path.exists():
                 with meta_path.open(encoding="utf-8") as f:
-                    data = json.load(f)
+                    data: dict[str, object] = json.load(f)
                     if data.get("version") == self.CACHE_VERSION:
                         # Update access time for LRU
                         meta_path.touch()

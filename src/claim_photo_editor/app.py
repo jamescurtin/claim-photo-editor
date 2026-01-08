@@ -134,6 +134,9 @@ class MainWindow(QMainWindow):
         self._old_loaders: list[PhotoLoaderWorker] = []  # Keep refs to prevent GC
         self._file_watcher: QFileSystemWatcher | None = None
         self._auto_refresh_timer: QTimer | None = None
+        self._loading_folder_path: Path | None = None
+        self._pdf_progress: QProgressDialog | None = None
+        self._pdf_folder_path: Path | None = None
         self._setup_ui()
         self._setup_menu()
         self._setup_file_watcher()
