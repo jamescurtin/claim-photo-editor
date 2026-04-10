@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,24 +63,30 @@ def get_secondary_text_color() -> str:
     return "#888888"
 
 
-class ThumbnailLoaderWorker(QThread):
-    """Background worker for loading a single thumbnail and reading metadata.
+class _ThumbnailSignals(QObject):
+    """Signal bridge for ThumbnailLoaderTask (QRunnable can't emit signals)."""
+
+    # path, image, caption, timestamp, dimensions
+    content_loaded = Signal(str, QImage, object, object, object)
+
+
+class ThumbnailLoaderTask(QRunnable):
+    """Pooled task for loading a single thumbnail and reading metadata.
 
     Uses QImage (thread-safe) instead of QPixmap (GUI-thread only). All
-    Pillow/image I/O is performed in this thread to avoid concurrent access
+    Pillow/image I/O is performed in the pool thread to avoid concurrent access
     to pillow-heif's non-thread-safe libheif from the main thread.
 
     Metadata is read into local variables and emitted via signal — the Photo
     object is only mutated on the main thread in the signal handler.
     """
 
-    # path, image, caption, timestamp, dimensions
-    content_loaded = Signal(str, QImage, object, object, object)
-
     def __init__(self, photo_path: Path, size: int) -> None:
         super().__init__()
         self.photo_path = photo_path
         self.size = size
+        self.signals = _ThumbnailSignals()
+        self.setAutoDelete(True)
 
     def run(self) -> None:
         """Load thumbnail and metadata in background."""
@@ -96,7 +102,7 @@ class ThumbnailLoaderWorker(QThread):
             # Check thumbnail cache (QImage variant is thread-safe)
             cached_image = cache.get_thumbnail_image(self.photo_path)
             if cached_image is not None:
-                self.content_loaded.emit(str(self.photo_path), cached_image, *metadata)
+                self.signals.content_loaded.emit(str(self.photo_path), cached_image, *metadata)
                 return
 
             image = load_qimage(self.photo_path)
@@ -108,9 +114,23 @@ class ThumbnailLoaderWorker(QThread):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 cache.save_thumbnail_image(self.photo_path, scaled)
-                self.content_loaded.emit(str(self.photo_path), scaled, *metadata)
+                self.signals.content_loaded.emit(str(self.photo_path), scaled, *metadata)
         except Exception:
             pass
+
+
+# Shared thread pool for thumbnail loading, capped to avoid memory exhaustion
+_thumbnail_pool: QThreadPool | None = None
+MAX_THUMBNAIL_THREADS = 4
+
+
+def _get_thumbnail_pool() -> QThreadPool:
+    """Get or create the shared thumbnail thread pool."""
+    global _thumbnail_pool  # noqa: PLW0603
+    if _thumbnail_pool is None:
+        _thumbnail_pool = QThreadPool()
+        _thumbnail_pool.setMaxThreadCount(MAX_THUMBNAIL_THREADS)
+    return _thumbnail_pool
 
 
 class PhotoThumbnail(QFrame):
@@ -134,7 +154,6 @@ class PhotoThumbnail(QFrame):
         """
         super().__init__(parent)
         self.photo = photo
-        self._loader: ThumbnailLoaderWorker | None = None
         self._content_loaded = False
         self._setup_ui(defer_load)
 
@@ -171,14 +190,14 @@ class PhotoThumbnail(QFrame):
             self.load_content()
 
     def load_content(self) -> None:
-        """Load the thumbnail and caption content in a background thread."""
+        """Submit thumbnail and metadata loading to the shared thread pool."""
         if self._content_loaded:
             return
         self._content_loaded = True
 
-        self._loader = ThumbnailLoaderWorker(self.photo.path, self.THUMBNAIL_SIZE)
-        self._loader.content_loaded.connect(self._on_content_loaded)
-        self._loader.start()
+        task = ThumbnailLoaderTask(self.photo.path, self.THUMBNAIL_SIZE)
+        task.signals.content_loaded.connect(self._on_content_loaded)
+        _get_thumbnail_pool().start(task)
 
     content_ready = Signal()  # Emitted when worker finishes
 
