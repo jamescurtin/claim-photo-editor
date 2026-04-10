@@ -9,7 +9,6 @@ from claim_photo_editor.utils.exif import (
     get_caption,
     get_image_dimensions,
     get_timestamp,
-    is_landscape,
     set_caption,
 )
 
@@ -25,7 +24,16 @@ class Photo:
     _is_landscape: bool | None = field(default=None, repr=False)
     _loaded: bool = field(default=False, repr=False)
 
-    SUPPORTED_EXTENSIONS: ClassVar[set[str]] = {".jpg", ".jpeg", ".png", ".tiff", ".tif"}
+    SUPPORTED_EXTENSIONS: ClassVar[set[str]] = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tiff",
+        ".tif",
+        ".heic",
+        ".heif",
+        ".webp",
+    }
 
     def __post_init__(self) -> None:
         """Validate the photo path."""
@@ -43,8 +51,14 @@ class Photo:
         self._caption = get_caption(self.path)
         self._timestamp = get_timestamp(self.path)
         self._dimensions = get_image_dimensions(self.path)
-        self._is_landscape = is_landscape(self.path)
+        w, h = self._dimensions
+        self._is_landscape = w > h
         self._loaded = True
+
+    @property
+    def is_loaded(self) -> bool:
+        """True if metadata has been loaded from disk."""
+        return self._loaded
 
     @property
     def name(self) -> str:

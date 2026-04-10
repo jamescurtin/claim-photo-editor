@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 
 # Default cache size in bytes (2GB)
 DEFAULT_MAX_CACHE_SIZE = 2 * 1024 * 1024 * 1024
@@ -63,49 +63,57 @@ class ThumbnailCache:
         subdir = cache_key[:2]
         return self._metadata_dir / subdir / f"{cache_key}.json"
 
-    def get_thumbnail(self, photo_path: Path) -> QPixmap | None:
-        """
-        Get a cached thumbnail for a photo.
-
-        Args:
-            photo_path: Path to the photo file.
-
-        Returns:
-            Cached QPixmap or None if not cached.
-        """
+    def _lookup_cached_path(self, photo_path: Path) -> Path | None:
+        """Return the cached thumbnail path if it exists, updating LRU access time."""
         try:
             cache_key = self._get_cache_key(photo_path)
             thumb_path = self._get_thumbnail_path(cache_key)
-
             if thumb_path.exists():
-                pixmap = QPixmap(str(thumb_path))
-                if not pixmap.isNull():
-                    # Update access time for LRU
-                    thumb_path.touch()
-                    return pixmap
+                thumb_path.touch()
+                return thumb_path
         except (OSError, ValueError):
             pass
-
         return None
 
-    def save_thumbnail(self, photo_path: Path, pixmap: QPixmap) -> bool:
-        """
-        Save a thumbnail to the cache.
-
-        Args:
-            photo_path: Path to the original photo.
-            pixmap: The thumbnail pixmap to cache.
-
-        Returns:
-            True if saved successfully.
-        """
+    def _prepare_save_path(self, photo_path: Path) -> Path | None:
+        """Return the path to write a thumbnail to, creating parent dirs."""
         try:
             cache_key = self._get_cache_key(photo_path)
             thumb_path = self._get_thumbnail_path(cache_key)
             thumb_path.parent.mkdir(parents=True, exist_ok=True)
-            return bool(pixmap.save(str(thumb_path), "PNG"))
+            return thumb_path
         except (OSError, ValueError):
+            return None
+
+    def get_thumbnail(self, photo_path: Path) -> QPixmap | None:
+        """Get a cached thumbnail as QPixmap. Only safe from the main/GUI thread."""
+        cached = self._lookup_cached_path(photo_path)
+        if cached is None:
+            return None
+        pixmap = QPixmap(str(cached))
+        return pixmap if not pixmap.isNull() else None
+
+    def get_thumbnail_image(self, photo_path: Path) -> QImage | None:
+        """Get a cached thumbnail as QImage. Thread-safe."""
+        cached = self._lookup_cached_path(photo_path)
+        if cached is None:
+            return None
+        image = QImage(str(cached))
+        return image if not image.isNull() else None
+
+    def save_thumbnail(self, photo_path: Path, pixmap: QPixmap) -> bool:
+        """Save a QPixmap thumbnail to cache. Only safe from the main/GUI thread."""
+        thumb_path = self._prepare_save_path(photo_path)
+        if thumb_path is None:
             return False
+        return bool(pixmap.save(str(thumb_path), "PNG"))
+
+    def save_thumbnail_image(self, photo_path: Path, image: QImage) -> bool:
+        """Save a QImage thumbnail to cache. Thread-safe."""
+        thumb_path = self._prepare_save_path(photo_path)
+        if thumb_path is None:
+            return False
+        return bool(image.save(str(thumb_path), b"PNG"))
 
     def get_metadata(self, photo_path: Path) -> dict[str, object] | None:
         """

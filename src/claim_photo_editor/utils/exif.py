@@ -5,11 +5,17 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import piexif
 from PIL import Image
+from PIL.ExifTags import IFD, Base
 
 # IPTC record markers
 IPTC_CAPTION_TAG = 0x78  # 2:120 - Caption/Abstract
+
+# Extension to Pillow save format mapping for formats that need explicit specification
+_EXT_TO_FORMAT: dict[str, str] = {
+    ".heic": "HEIF",
+    ".heif": "HEIF",
+}
 
 
 def _decode_html_entities(text: str) -> str:
@@ -100,6 +106,14 @@ def _encode_user_comment(text: str) -> bytes:
     return prefix + text.encode("ascii", errors="replace")
 
 
+def _get_save_format(image_path: Path, img: Image.Image) -> str:
+    """Determine the Pillow save format for an image path."""
+    ext = image_path.suffix.lower()
+    if ext in _EXT_TO_FORMAT:
+        return _EXT_TO_FORMAT[ext]
+    return img.format or "JPEG"
+
+
 def get_caption(image_path: Path) -> str | None:
     """
     Read the caption from an image's metadata.
@@ -115,32 +129,26 @@ def get_caption(image_path: Path) -> str | None:
     Returns:
         The caption string, or None if no caption is set.
     """
-    # Try EXIF UserComment first
-    try:
-        exif_dict = piexif.load(str(image_path))
-        exif_data = exif_dict.get("Exif", {})
-
-        if piexif.ExifIFD.UserComment in exif_data:
-            raw_comment = exif_data[piexif.ExifIFD.UserComment]
-            if isinstance(raw_comment, bytes):
-                caption = _decode_user_comment(raw_comment)
-                # Check if caption contains actual content (not just whitespace/nulls)
-                if caption and caption.strip("\x00 \t\n\r"):
-                    return _decode_html_entities(caption.strip("\x00 \t\n\r"))
-            elif isinstance(raw_comment, str):
-                caption = raw_comment.strip("\x00 \t\n\r")
-                if caption:
-                    return _decode_html_entities(caption)
-    except Exception:
-        pass
-
-    # Try IPTC and XMP via PIL
     try:
         with Image.open(image_path) as img:
+            # Try EXIF UserComment first
+            exif = img.getexif()
+            exif_ifd = exif.get_ifd(IFD.Exif)
+
+            raw_comment = exif_ifd.get(Base.UserComment)
+            if isinstance(raw_comment, bytes):
+                caption = _decode_user_comment(raw_comment)
+                clean = caption.strip("\x00 \t\n\r")
+                if clean:
+                    return _decode_html_entities(clean)
+            elif isinstance(raw_comment, str):
+                clean = raw_comment.strip("\x00 \t\n\r")
+                if clean:
+                    return _decode_html_entities(clean)
+
             # Try IPTC (stored in photoshop info)
             photoshop = img.info.get("photoshop")
             if isinstance(photoshop, dict):
-                # IPTC is typically in key 1028
                 iptc_data = photoshop.get(1028)
                 if isinstance(iptc_data, bytes):
                     iptc_caption = _extract_iptc_caption(iptc_data)
@@ -171,29 +179,22 @@ def set_caption(image_path: Path, caption: str) -> bool:
         True if successful, False otherwise.
     """
     try:
-        # Load existing EXIF data or create new
-        try:
-            exif_dict = piexif.load(str(image_path))
-        except Exception:
-            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
-
-        # Ensure Exif dict exists
-        if "Exif" not in exif_dict:
-            exif_dict["Exif"] = {}
-
-        # Set the UserComment field
-        exif_dict["Exif"][piexif.ExifIFD.UserComment] = _encode_user_comment(caption)
-
-        # Dump to bytes
-        exif_bytes = piexif.dump(exif_dict)
-
-        # Open and save image with new EXIF
         with Image.open(image_path) as img:
-            # Preserve original format
-            img_format = img.format or "JPEG"
+            exif = img.getexif()
+            exif_ifd = exif.get_ifd(IFD.Exif)
+
+            # Set the UserComment field
+            exif_ifd[Base.UserComment] = _encode_user_comment(caption)
+
+            # Determine save format
+            img_format = _get_save_format(image_path, img)
+            exif_bytes = exif.tobytes()
 
             # Save with EXIF data
-            img.save(str(image_path), format=img_format, exif=exif_bytes, quality=95)
+            if img_format in ("JPEG", "WEBP"):
+                img.save(str(image_path), format=img_format, exif=exif_bytes, quality=95)
+            else:
+                img.save(str(image_path), format=img_format, exif=exif_bytes)
 
         return True
 
@@ -212,32 +213,30 @@ def get_timestamp(image_path: Path) -> datetime | None:
         The timestamp as a datetime object, or None if not available.
     """
     try:
-        exif_dict = piexif.load(str(image_path))
-        exif_data = exif_dict.get("Exif", {})
+        with Image.open(image_path) as img:
+            exif = img.getexif()
+            exif_ifd = exif.get_ifd(IFD.Exif)
 
-        # Try DateTimeOriginal first, then DateTimeDigitized
-        for tag in [piexif.ExifIFD.DateTimeOriginal, piexif.ExifIFD.DateTimeDigitized]:
-            if tag in exif_data:
-                raw_date = exif_data[tag]
+            # Try DateTimeOriginal first, then DateTimeDigitized
+            for tag in [Base.DateTimeOriginal, Base.DateTimeDigitized]:
+                raw_date = exif_ifd.get(tag)
+                if raw_date is not None:
+                    if isinstance(raw_date, bytes):
+                        raw_date = raw_date.decode("utf-8", errors="ignore")
+                    try:
+                        return datetime.strptime(raw_date, "%Y:%m:%d %H:%M:%S")
+                    except ValueError:
+                        continue
+
+            # Fallback to 0th IFD DateTime
+            raw_date = exif.get(Base.DateTime)
+            if raw_date is not None:
                 if isinstance(raw_date, bytes):
                     raw_date = raw_date.decode("utf-8", errors="ignore")
-
-                # Parse EXIF date format: "YYYY:MM:DD HH:MM:SS"
                 try:
                     return datetime.strptime(raw_date, "%Y:%m:%d %H:%M:%S")
                 except ValueError:
-                    continue
-
-        # Fallback to 0th IFD DateTime
-        zeroth = exif_dict.get("0th", {})
-        if piexif.ImageIFD.DateTime in zeroth:
-            raw_date = zeroth[piexif.ImageIFD.DateTime]
-            if isinstance(raw_date, bytes):
-                raw_date = raw_date.decode("utf-8", errors="ignore")
-            try:
-                return datetime.strptime(raw_date, "%Y:%m:%d %H:%M:%S")
-            except ValueError:
-                pass
+                    pass
 
     except Exception:
         pass
@@ -261,10 +260,10 @@ def get_image_orientation(image_path: Path) -> int:
         EXIF orientation value (1-8), or 1 if not found.
     """
     try:
-        exif_dict = piexif.load(str(image_path))
-        zeroth = exif_dict.get("0th", {})
-        orientation: int = zeroth.get(piexif.ImageIFD.Orientation, 1)
-        return orientation
+        with Image.open(image_path) as img:
+            exif = img.getexif()
+            orientation: int = exif.get(Base.Orientation, 1)
+            return orientation
     except Exception:
         return 1
 
@@ -281,12 +280,9 @@ def get_image_dimensions(image_path: Path) -> tuple[int, int]:
     """
     with Image.open(image_path) as img:
         width, height = img.size
-
-        # Check orientation - some orientations swap width/height
-        orientation = get_image_orientation(image_path)
+        orientation: int = img.getexif().get(Base.Orientation, 1)
         if orientation in (5, 6, 7, 8):
             width, height = height, width
-
         return width, height
 
 

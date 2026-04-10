@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QMouseEvent, QPalette, QPixmap
+from PySide6.QtGui import QImage, QMouseEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -21,10 +21,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from claim_photo_editor.models.photo import Photo
 from claim_photo_editor.services.thumbnail_cache import get_thumbnail_cache
 
 if TYPE_CHECKING:
-    from claim_photo_editor.models.photo import Photo
+    from datetime import datetime
+from claim_photo_editor.utils.exif import (
+    get_caption,
+    get_image_dimensions,
+    get_timestamp,
+)
+from claim_photo_editor.utils.image_loader import load_qimage
 
 
 class PhotoFilter(Enum):
@@ -57,9 +64,18 @@ def get_secondary_text_color() -> str:
 
 
 class ThumbnailLoaderWorker(QThread):
-    """Background worker for loading a single thumbnail."""
+    """Background worker for loading a single thumbnail and reading metadata.
 
-    thumbnail_loaded = Signal(str, QPixmap, bool)  # path, pixmap, from_cache
+    Uses QImage (thread-safe) instead of QPixmap (GUI-thread only). All
+    Pillow/image I/O is performed in this thread to avoid concurrent access
+    to pillow-heif's non-thread-safe libheif from the main thread.
+
+    Metadata is read into local variables and emitted via signal — the Photo
+    object is only mutated on the main thread in the signal handler.
+    """
+
+    # path, image, caption, timestamp, dimensions
+    content_loaded = Signal(str, QImage, object, object, object)
 
     def __init__(self, photo_path: Path, size: int) -> None:
         super().__init__()
@@ -67,28 +83,32 @@ class ThumbnailLoaderWorker(QThread):
         self.size = size
 
     def run(self) -> None:
-        """Load thumbnail in background, checking cache first."""
+        """Load thumbnail and metadata in background."""
         try:
+            # Read metadata into local variables (no Photo mutation)
+            caption = get_caption(self.photo_path)
+            timestamp = get_timestamp(self.photo_path)
+            dimensions = get_image_dimensions(self.photo_path)
+            metadata = (caption, timestamp, dimensions)
+
             cache = get_thumbnail_cache()
 
-            # Check cache first
-            cached_pixmap = cache.get_thumbnail(self.photo_path)
-            if cached_pixmap is not None:
-                self.thumbnail_loaded.emit(str(self.photo_path), cached_pixmap, True)
+            # Check thumbnail cache (QImage variant is thread-safe)
+            cached_image = cache.get_thumbnail_image(self.photo_path)
+            if cached_image is not None:
+                self.content_loaded.emit(str(self.photo_path), cached_image, *metadata)
                 return
 
-            # Load from disk
-            pixmap = QPixmap(str(self.photo_path))
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
+            image = load_qimage(self.photo_path)
+            if not image.isNull():
+                scaled = image.scaled(
                     self.size,
                     self.size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                # Save to cache
-                cache.save_thumbnail(self.photo_path, scaled)
-                self.thumbnail_loaded.emit(str(self.photo_path), scaled, False)
+                cache.save_thumbnail_image(self.photo_path, scaled)
+                self.content_loaded.emit(str(self.photo_path), scaled, *metadata)
         except Exception:
             pass
 
@@ -102,7 +122,7 @@ class PhotoThumbnail(QFrame):
     CAPTION_HEIGHT = 50  # Increased height for caption display
 
     def __init__(
-        self, photo: "Photo", parent: QWidget | None = None, defer_load: bool = False
+        self, photo: Photo, parent: QWidget | None = None, defer_load: bool = False
     ) -> None:
         """
         Initialize the thumbnail widget.
@@ -151,47 +171,58 @@ class PhotoThumbnail(QFrame):
             self.load_content()
 
     def load_content(self) -> None:
-        """Load the thumbnail and caption content."""
+        """Load the thumbnail and caption content in a background thread."""
         if self._content_loaded:
             return
         self._content_loaded = True
 
-        # Load thumbnail in background
-        self._load_thumbnail_async()
-        # Update caption (reads EXIF data)
-        self._update_caption()
-
-    def _load_thumbnail_async(self) -> None:
-        """Load thumbnail asynchronously."""
-        # Start background loader
         self._loader = ThumbnailLoaderWorker(self.photo.path, self.THUMBNAIL_SIZE)
-        self._loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        self._loader.content_loaded.connect(self._on_content_loaded)
         self._loader.start()
 
-    def _on_thumbnail_loaded(self, path: str, pixmap: QPixmap, _from_cache: bool) -> None:
-        """Handle thumbnail loaded from background thread."""
-        if path == str(self.photo.path):
-            self.image_label.setPixmap(pixmap)
+    content_ready = Signal()  # Emitted when worker finishes
 
-    def _update_caption(self) -> None:
-        """Update the caption display."""
-        caption = self.photo.caption
-        text_color = get_text_color()
+    def _on_content_loaded(
+        self,
+        path: str,
+        image: QImage,
+        caption: str | None,
+        timestamp: "datetime | None",
+        dimensions: tuple[int, int],
+    ) -> None:
+        """Handle thumbnail and caption loaded from background thread.
 
+        Writes metadata to the Photo object on the main thread (safe).
+        """
+        if path != str(self.photo.path):
+            return
+        # Apply metadata to Photo on the main thread
+        self.photo._caption = caption
+        self.photo._timestamp = timestamp
+        self.photo._dimensions = dimensions
+        w, h = dimensions
+        self.photo._is_landscape = w > h
+        self.photo._loaded = True
+
+        self.image_label.setPixmap(QPixmap.fromImage(image))
+        self._update_caption_display(caption)
+        self.content_ready.emit()
+
+    def _update_caption_display(self, caption: str | None) -> None:
+        """Update the caption label text."""
         if caption:
-            # Truncate long captions
+            text_color = get_text_color()
             display_text = caption if len(caption) <= 60 else caption[:57] + "..."
             self.caption_label.setText(display_text)
             self.caption_label.setStyleSheet(f"color: {text_color};")
         else:
-            # Show blank instead of "(No caption)"
             self.caption_label.setText("")
             self.caption_label.setStyleSheet("")
 
     def refresh(self) -> None:
         """Refresh the display after caption change."""
         self.photo.reload()
-        self._update_caption()
+        self._update_caption_display(self.photo.caption)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Handle mouse press to emit clicked signal."""
@@ -218,6 +249,7 @@ class GridView(QWidget):
         self._is_loading = False
         self._pending_photos: list[Photo] = []
         self._batch_timer: QTimer | None = None
+        self._workers_pending = 0
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -307,7 +339,7 @@ class GridView(QWidget):
         self.loading_widget.hide()
         self.scroll_area.show()
 
-    def set_photos(self, photos: list["Photo"], folder_path: Path) -> None:
+    def set_photos(self, photos: list[Photo], folder_path: Path) -> None:
         """
         Set the photos to display.
 
@@ -342,6 +374,7 @@ class GridView(QWidget):
         for thumb in self._thumbnails:
             thumb.deleteLater()
         self._thumbnails.clear()
+        self._workers_pending = 0
 
         # Filter photos - for "ALL" filter, skip has_caption check during initial load
         if self._current_filter == PhotoFilter.ALL:
@@ -381,13 +414,14 @@ class GridView(QWidget):
             idx = start_idx + i
             thumb = PhotoThumbnail(photo, defer_load=True)
             thumb.clicked.connect(self._on_thumbnail_clicked)
+            thumb.content_ready.connect(self._on_worker_finished)
 
             row = idx // self.COLUMNS
             col = idx % self.COLUMNS
             self.grid_layout.addWidget(thumb, row, col)
             self._thumbnails.append(thumb)
 
-            # Load content (this reads EXIF)
+            self._workers_pending += 1
             thumb.load_content()
 
         # Update progress
@@ -400,19 +434,8 @@ class GridView(QWidget):
         QApplication.processEvents()
 
     def _finish_loading(self) -> None:
-        """Finish loading and update UI."""
-        # Hide loading, show grid
+        """Finish batch dispatching and show the grid. Status updates when workers complete."""
         self.hide_loading()
-
-        # Update status
-        total = len(self._photos)
-        # Count captioned - we need to check each photo's caption
-        captioned = sum(1 for p in self._photos if p.has_caption)
-        filtered = len(self._thumbnails)
-        self.status_label.setText(f"Showing {filtered} of {total} photos ({captioned} captioned)")
-
-        # Enable/disable Generate PDF button
-        self.generate_btn.setEnabled(captioned > 0)
 
         # Add spacer at bottom
         spacer = QWidget()
@@ -421,7 +444,25 @@ class GridView(QWidget):
             spacer, len(self._thumbnails) // self.COLUMNS + 1, 0, 1, self.COLUMNS
         )
 
-    def _get_filtered_photos(self) -> list["Photo"]:
+        # If all workers already finished (e.g., all from cache), update status now
+        if self._workers_pending <= 0:
+            self._update_status()
+
+    def _on_worker_finished(self) -> None:
+        """Called when a thumbnail worker completes. Updates status when all are done."""
+        self._workers_pending -= 1
+        if self._workers_pending <= 0:
+            self._update_status()
+
+    def _update_status(self) -> None:
+        """Update the status bar and Generate PDF button from loaded metadata."""
+        total = len(self._photos)
+        captioned = sum(1 for p in self._photos if p.is_loaded and p.has_caption)
+        filtered = len(self._thumbnails)
+        self.status_label.setText(f"Showing {filtered} of {total} photos ({captioned} captioned)")
+        self.generate_btn.setEnabled(captioned > 0)
+
+    def _get_filtered_photos(self) -> list[Photo]:
         """Get photos based on current filter."""
         if self._current_filter == PhotoFilter.ALL:
             return self._photos
@@ -435,11 +476,11 @@ class GridView(QWidget):
         self._current_filter = self.filter_combo.itemData(index)
         self._refresh_grid()
 
-    def _on_thumbnail_clicked(self, photo: "Photo") -> None:
+    def _on_thumbnail_clicked(self, photo: Photo) -> None:
         """Handle thumbnail click."""
         self.photo_selected.emit(photo)
 
-    def refresh_photo(self, photo: "Photo") -> None:
+    def refresh_photo(self, photo: Photo) -> None:
         """
         Refresh a specific photo's thumbnail.
 
@@ -451,14 +492,9 @@ class GridView(QWidget):
                 thumb.refresh()
                 break
 
-        # Also refresh the status
-        captioned = sum(1 for p in self._photos if p.has_caption)
-        self.generate_btn.setEnabled(captioned > 0)
-        total = len(self._photos)
-        filtered = len(self._get_filtered_photos())
-        self.status_label.setText(f"Showing {filtered} of {total} photos ({captioned} captioned)")
+        self._update_status()
 
-    def get_captioned_photos(self) -> list["Photo"]:
+    def get_captioned_photos(self) -> list[Photo]:
         """Get all photos that have captions."""
         return [p for p in self._photos if p.has_caption]
 

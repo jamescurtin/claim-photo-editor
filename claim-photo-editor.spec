@@ -17,9 +17,9 @@ resources_dir = src_dir / 'resources'
 if resources_dir.exists():
     datas.append((str(resources_dir), 'claim_photo_editor/resources'))
 
-# Collect all piexif data
-piexif_datas, piexif_binaries, piexif_hiddenimports = collect_all('piexif')
-datas.extend(piexif_datas)
+# Collect pillow-heif data (HEIC/HEIF image support)
+heif_datas, heif_binaries, heif_hiddenimports = collect_all('pillow_heif')
+datas.extend(heif_datas)
 
 # Collect PIL/Pillow submodules
 pil_hiddenimports = collect_submodules('PIL')
@@ -27,7 +27,7 @@ pil_hiddenimports = collect_submodules('PIL')
 a = Analysis(
     [str(src_dir / 'main.py')],
     pathex=[str(Path('src').absolute())],
-    binaries=piexif_binaries,
+    binaries=heif_binaries,
     datas=datas,
     hiddenimports=[
         'PySide6.QtCore',
@@ -38,9 +38,7 @@ a = Analysis(
         'PIL.Image',
         'PIL.ImageOps',
         'PIL.ExifTags',
-        'piexif',
-        'piexif._exif',
-        'piexif._webp',
+        'pillow_heif',
         'reportlab',
         'reportlab.lib',
         'reportlab.lib.colors',
@@ -50,7 +48,7 @@ a = Analysis(
         'reportlab.lib.utils',
         'reportlab.pdfgen',
         'reportlab.pdfgen.canvas',
-    ] + piexif_hiddenimports + pil_hiddenimports,
+    ] + heif_hiddenimports + pil_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

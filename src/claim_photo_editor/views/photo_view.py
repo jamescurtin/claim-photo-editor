@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from claim_photo_editor.utils.image_loader import load_pixmap
+
 if TYPE_CHECKING:
     from claim_photo_editor.models.photo import Photo
 
@@ -41,6 +43,7 @@ class PhotoView(QWidget):
         """Initialize the photo view."""
         super().__init__(parent)
         self._photo: Photo | None = None
+        self._full_pixmap: QPixmap | None = None
         self._auto_save_timer: QTimer | None = None
         self._last_saved_caption: str = ""
         self._setup_ui()
@@ -210,6 +213,7 @@ class PhotoView(QWidget):
             photo: The Photo object to display.
         """
         self._photo = photo
+        self._full_pixmap = load_pixmap(photo.path)
         self._update_display()
 
     def _update_display(self) -> None:
@@ -217,19 +221,7 @@ class PhotoView(QWidget):
         if not self._photo:
             return
 
-        # Load and display image
-        pixmap = QPixmap(str(self._photo.path))
-        if not pixmap.isNull():
-            # Scale to fit while maintaining aspect ratio
-            scaled = pixmap.scaled(
-                self.image_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self.image_label.setPixmap(scaled)
-        else:
-            self.image_label.setText("Failed to load image")
-            self.image_label.setStyleSheet("color: white; background-color: #000;")
+        self._scale_image()
 
         # Update metadata
         self.filename_value.setText(self._photo.name)
@@ -243,11 +235,24 @@ class PhotoView(QWidget):
         self.save_status_label.setText("")
         self.caption_input.blockSignals(False)
 
+    def _scale_image(self) -> None:
+        """Scale the cached full-resolution pixmap to fit the display label."""
+        if self._full_pixmap and not self._full_pixmap.isNull():
+            scaled = self._full_pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.image_label.setPixmap(scaled)
+        else:
+            self.image_label.setText("Failed to load image")
+            self.image_label.setStyleSheet("color: white; background-color: #000;")
+
     def resizeEvent(self, event: QResizeEvent) -> None:
-        """Handle resize to update image scaling."""
+        """Handle resize to rescale the cached image."""
         super().resizeEvent(event)
         if self._photo:
-            self._update_display()
+            self._scale_image()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Handle mouse press to clear focus from caption input."""
