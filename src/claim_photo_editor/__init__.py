@@ -4,7 +4,7 @@ import pillow_heif
 
 pillow_heif.register_heif_opener()
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 __app_name__ = "Claim Photo Editor"
 __author__ = "James Curtin"
 __github_repo__ = "jamescurtin/claim-photo-editor"
