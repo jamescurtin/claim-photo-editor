@@ -64,11 +64,18 @@ class ThumbnailCache:
         return self._metadata_dir / subdir / f"{cache_key}.json"
 
     def _lookup_cached_path(self, photo_path: Path) -> Path | None:
-        """Return the cached thumbnail path if it exists, updating LRU access time."""
+        """Return the cached thumbnail path if it exists, updating LRU access time.
+
+        Removes empty/corrupted files (e.g., from a prior crash) rather than
+        returning them as cache hits.
+        """
         try:
             cache_key = self._get_cache_key(photo_path)
             thumb_path = self._get_thumbnail_path(cache_key)
             if thumb_path.exists():
+                if thumb_path.stat().st_size == 0:
+                    thumb_path.unlink(missing_ok=True)
+                    return None
                 thumb_path.touch()
                 return thumb_path
         except (OSError, ValueError):
@@ -113,7 +120,7 @@ class ThumbnailCache:
         thumb_path = self._prepare_save_path(photo_path)
         if thumb_path is None:
             return False
-        return bool(image.save(str(thumb_path), b"PNG"))
+        return bool(image.save(str(thumb_path)))
 
     def get_metadata(self, photo_path: Path) -> dict[str, object] | None:
         """

@@ -2,9 +2,11 @@
 
 from enum import Enum
 from pathlib import Path
+from queue import Queue
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PIL import Image, ImageOps
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,7 +33,6 @@ from claim_photo_editor.utils.exif import (
     get_image_dimensions,
     get_timestamp,
 )
-from claim_photo_editor.utils.image_loader import load_qimage
 
 
 class PhotoFilter(Enum):
@@ -63,74 +64,94 @@ def get_secondary_text_color() -> str:
     return "#888888"
 
 
-class _ThumbnailSignals(QObject):
-    """Signal bridge for ThumbnailLoaderTask (QRunnable can't emit signals)."""
+_SENTINEL = None  # Poison pill to stop workers
+
+
+class ThumbnailWorker(QThread):
+    """Worker thread that processes thumbnail load requests from a shared queue.
+
+    Uses QImage (thread-safe) instead of QPixmap (GUI-thread only). All
+    Pillow/image I/O is performed in this thread to avoid concurrent access
+    to pillow-heif's non-thread-safe libheif from the main thread.
+    """
 
     # path, image, caption, timestamp, dimensions
     content_loaded = Signal(str, QImage, object, object, object)
 
-
-class ThumbnailLoaderTask(QRunnable):
-    """Pooled task for loading a single thumbnail and reading metadata.
-
-    Uses QImage (thread-safe) instead of QPixmap (GUI-thread only). All
-    Pillow/image I/O is performed in the pool thread to avoid concurrent access
-    to pillow-heif's non-thread-safe libheif from the main thread.
-
-    Metadata is read into local variables and emitted via signal — the Photo
-    object is only mutated on the main thread in the signal handler.
-    """
-
-    def __init__(self, photo_path: Path, size: int) -> None:
+    def __init__(self, queue: "Queue[tuple[Path, int] | None]") -> None:
         super().__init__()
-        self.photo_path = photo_path
-        self.size = size
-        self.signals = _ThumbnailSignals()
-        self.setAutoDelete(True)
+        self._queue = queue
 
     def run(self) -> None:
-        """Load thumbnail and metadata in background."""
-        try:
-            # Read metadata into local variables (no Photo mutation)
-            caption = get_caption(self.photo_path)
-            timestamp = get_timestamp(self.photo_path)
-            dimensions = get_image_dimensions(self.photo_path)
-            metadata = (caption, timestamp, dimensions)
+        """Process items from the queue until a sentinel is received.
 
-            cache = get_thumbnail_cache()
-
-            # Check thumbnail cache (QImage variant is thread-safe)
-            cached_image = cache.get_thumbnail_image(self.photo_path)
-            if cached_image is not None:
-                self.signals.content_loaded.emit(str(self.photo_path), cached_image, *metadata)
+        All image operations use Pillow (thread-safe). QImage is only created
+        at the end from raw pixel data for the signal — no Qt image I/O calls
+        are made from this thread (Qt's image plugins are not thread-safe).
+        """
+        while True:
+            item = self._queue.get()
+            if item is _SENTINEL:
                 return
+            photo_path, size = item
+            try:
+                caption = get_caption(photo_path)
+                timestamp = get_timestamp(photo_path)
+                dimensions = get_image_dimensions(photo_path)
 
-            image = load_qimage(self.photo_path)
-            if not image.isNull():
-                scaled = image.scaled(
-                    self.size,
-                    self.size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                cache.save_thumbnail_image(self.photo_path, scaled)
-                self.signals.content_loaded.emit(str(self.photo_path), scaled, *metadata)
-        except Exception:
-            pass
+                cache = get_thumbnail_cache()
+
+                # Check thumbnail cache — load as Pillow image (thread-safe)
+                cached_path = cache._lookup_cached_path(photo_path)
+                if cached_path is not None:
+                    with Image.open(cached_path) as cached_pil:
+                        qimage = self._pil_to_qimage(cached_pil)
+                    self.content_loaded.emit(
+                        str(photo_path), qimage, caption, timestamp, dimensions
+                    )
+                    continue
+
+                # Load and scale with Pillow (thread-safe)
+                with Image.open(photo_path) as raw_img:
+                    oriented = ImageOps.exif_transpose(raw_img) or raw_img
+                    oriented.thumbnail((size, size), Image.Resampling.LANCZOS)
+                    thumb = oriented.convert("RGB")
+
+                    # Save to cache using Pillow (thread-safe)
+                    save_path = cache._prepare_save_path(photo_path)
+                    if save_path is not None:
+                        thumb.save(str(save_path), "PNG")
+
+                    qimage = self._pil_to_qimage(thumb)
+
+                self.content_loaded.emit(str(photo_path), qimage, caption, timestamp, dimensions)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _pil_to_qimage(pil_img: Image.Image) -> QImage:
+        """Convert a Pillow image to QImage without using Qt image I/O."""
+        rgb = pil_img.convert("RGB")
+        data = rgb.tobytes("raw", "RGB")
+        qimage = QImage(data, rgb.width, rgb.height, 3 * rgb.width, QImage.Format.Format_RGB888)
+        return qimage.copy()  # Copy before data goes out of scope
 
 
-# Shared thread pool for thumbnail loading, capped to avoid memory exhaustion
-_thumbnail_pool: QThreadPool | None = None
-MAX_THUMBNAIL_THREADS = 4
+# Single worker to avoid Qt image I/O thread-safety issues (QImage.save/scaled
+# crash when called concurrently from multiple threads).
+MAX_THUMBNAIL_WORKERS = 1
+_work_queue: Queue[tuple[Path, int] | None] = Queue()
+_workers: list[ThumbnailWorker] = []
 
 
-def _get_thumbnail_pool() -> QThreadPool:
-    """Get or create the shared thumbnail thread pool."""
-    global _thumbnail_pool  # noqa: PLW0603
-    if _thumbnail_pool is None:
-        _thumbnail_pool = QThreadPool()
-        _thumbnail_pool.setMaxThreadCount(MAX_THUMBNAIL_THREADS)
-    return _thumbnail_pool
+def _ensure_workers() -> None:
+    """Start worker threads if not already running."""
+    if _workers:
+        return
+    for _ in range(MAX_THUMBNAIL_WORKERS):
+        w = ThumbnailWorker(_work_queue)
+        _workers.append(w)
+        w.start()
 
 
 class PhotoThumbnail(QFrame):
@@ -190,35 +211,26 @@ class PhotoThumbnail(QFrame):
             self.load_content()
 
     def load_content(self) -> None:
-        """Submit thumbnail and metadata loading to the shared thread pool."""
+        """Submit thumbnail and metadata loading to the shared worker pool."""
         if self._content_loaded:
             return
         self._content_loaded = True
-
-        task = ThumbnailLoaderTask(self.photo.path, self.THUMBNAIL_SIZE)
-        # Hold a reference to the signals object so it isn't garbage collected
-        # before the signal fires (QThreadPool owns the QRunnable C++ side only).
-        self._task_signals = task.signals
-        task.signals.content_loaded.connect(self._on_content_loaded)
-        _get_thumbnail_pool().start(task)
+        _work_queue.put((self.photo.path, self.THUMBNAIL_SIZE))
 
     content_ready = Signal()  # Emitted when worker finishes
 
-    def _on_content_loaded(
+    def apply_loaded_content(
         self,
-        path: str,
         image: QImage,
         caption: str | None,
         timestamp: "datetime | None",
         dimensions: tuple[int, int],
     ) -> None:
-        """Handle thumbnail and caption loaded from background thread.
+        """Apply loaded thumbnail and metadata from a worker thread.
 
+        Called by GridView._on_worker_content_loaded after path dispatch.
         Writes metadata to the Photo object on the main thread (safe).
         """
-        if path != str(self.photo.path):
-            return
-        # Apply metadata to Photo on the main thread
         self.photo._caption = caption
         self.photo._timestamp = timestamp
         self.photo._dimensions = dimensions
@@ -266,13 +278,38 @@ class GridView(QWidget):
         super().__init__(parent)
         self._photos: list[Photo] = []
         self._thumbnails: list[PhotoThumbnail] = []
+        self._thumb_by_path: dict[str, PhotoThumbnail] = {}
         self._current_filter = PhotoFilter.ALL
         self._current_folder: Path | None = None
         self._is_loading = False
         self._pending_photos: list[Photo] = []
         self._batch_timer: QTimer | None = None
         self._workers_pending = 0
+        self._workers_connected = False
         self._setup_ui()
+        self._connect_workers()
+
+    def _connect_workers(self) -> None:
+        """Start worker threads and connect their signals."""
+        if self._workers_connected:
+            return
+        _ensure_workers()
+        for w in _workers:
+            w.content_loaded.connect(self._on_worker_content_loaded)
+        self._workers_connected = True
+
+    def _on_worker_content_loaded(
+        self,
+        path: str,
+        image: QImage,
+        caption: str | None,
+        timestamp: "datetime | None",
+        dimensions: tuple[int, int],
+    ) -> None:
+        """Dispatch worker results to the correct PhotoThumbnail."""
+        thumb = self._thumb_by_path.get(path)
+        if thumb is not None:
+            thumb.apply_loaded_content(image, caption, timestamp, dimensions)
 
     def _setup_ui(self) -> None:
         """Set up the UI components."""
@@ -392,10 +429,18 @@ class GridView(QWidget):
         if self._batch_timer:
             self._batch_timer.stop()
 
+        # Drain stale work items so the new folder's items are processed immediately
+        while not _work_queue.empty():
+            try:
+                _work_queue.get_nowait()
+            except Exception:
+                break
+
         # Clear existing thumbnails
         for thumb in self._thumbnails:
             thumb.deleteLater()
         self._thumbnails.clear()
+        self._thumb_by_path.clear()
         self._workers_pending = 0
 
         # Filter photos - for "ALL" filter, skip has_caption check during initial load
@@ -442,6 +487,7 @@ class GridView(QWidget):
             col = idx % self.COLUMNS
             self.grid_layout.addWidget(thumb, row, col)
             self._thumbnails.append(thumb)
+            self._thumb_by_path[str(photo.path)] = thumb
 
             self._workers_pending += 1
             thumb.load_content()
@@ -536,6 +582,7 @@ class GridView(QWidget):
         for thumb in self._thumbnails:
             thumb.deleteLater()
         self._thumbnails.clear()
+        self._thumb_by_path.clear()
         self.folder_label.setText("Select a folder")
         self.status_label.setText("")
         self.generate_btn.setEnabled(False)
