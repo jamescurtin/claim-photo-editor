@@ -196,6 +196,9 @@ class PhotoThumbnail(QFrame):
         self._content_loaded = True
 
         task = ThumbnailLoaderTask(self.photo.path, self.THUMBNAIL_SIZE)
+        # Hold a reference to the signals object so it isn't garbage collected
+        # before the signal fires (QThreadPool owns the QRunnable C++ side only).
+        self._task_signals = task.signals
         task.signals.content_loaded.connect(self._on_content_loaded)
         _get_thumbnail_pool().start(task)
 
