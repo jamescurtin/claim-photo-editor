@@ -162,6 +162,7 @@ class PDFGenerator:
         cell_x: float,
         cell_y: float,
         cell_width: float,
+        *,
         image_height: float,
         caption_height: float,
     ) -> None:
@@ -272,7 +273,13 @@ class PDFGenerator:
                 cell_y = page_height - margin_top - (row + 1) * cell_height
 
                 self._draw_photo_cell(
-                    c, photo, cell_x, cell_y, cell_width, image_height, caption_height
+                    c,
+                    photo,
+                    cell_x,
+                    cell_y,
+                    cell_width,
+                    image_height=image_height,
+                    caption_height=caption_height,
                 )
 
                 processed += 1
