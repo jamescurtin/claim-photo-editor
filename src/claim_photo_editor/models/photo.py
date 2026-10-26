@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import ClassVar
 
 from claim_photo_editor.utils.exif import (
+    HEIF_EXTENSIONS,
+    convert_heif_to_jpeg,
     get_caption,
     get_image_dimensions,
     get_timestamp,
@@ -77,7 +79,14 @@ class Photo:
         if value is None:
             value = ""
 
-        if set_caption(self.path, value):
+        if self.path.suffix.lower() in HEIF_EXTENSIONS:
+            # HEIF metadata cannot be edited losslessly; convert to JPEG once
+            try:
+                self.path = convert_heif_to_jpeg(self.path, value)
+            except Exception as e:
+                raise OSError(f"Failed to convert {self.path} to JPEG") from e
+            self._caption = value if value else None
+        elif set_caption(self.path, value):
             self._caption = value if value else None
         else:
             raise OSError(f"Failed to save caption to {self.path}")
