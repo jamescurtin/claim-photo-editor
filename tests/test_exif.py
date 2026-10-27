@@ -1,10 +1,12 @@
 """Tests for EXIF utilities."""
 
+import os
+import struct
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageCms
 from PIL.ExifTags import IFD, Base
 
 from claim_photo_editor.utils.exif import (
@@ -145,10 +147,11 @@ class TestCaptionRoundtripFormats:
         assert set_caption(sample_image, "JPEG caption") is True
         assert get_caption(sample_image) == "JPEG caption"
 
-    def test_heic_roundtrip(self, sample_heic_image: Path) -> None:
-        """Test caption roundtrip for HEIC format."""
-        assert set_caption(sample_heic_image, "HEIC caption") is True
-        assert get_caption(sample_heic_image) == "HEIC caption"
+    def test_heic_refused(self, sample_heic_image: Path) -> None:
+        """Test that HEIC is never written in place (it is converted to JPEG instead)."""
+        original = sample_heic_image.read_bytes()
+        assert set_caption(sample_heic_image, "HEIC caption") is False
+        assert sample_heic_image.read_bytes() == original
 
     def test_webp_roundtrip(self, sample_webp_image: Path) -> None:
         """Test caption roundtrip for WebP format."""
@@ -164,16 +167,6 @@ class TestCaptionRoundtripFormats:
         """Test caption roundtrip for TIFF format."""
         assert set_caption(sample_tiff_image, "TIFF caption") is True
         assert get_caption(sample_tiff_image) == "TIFF caption"
-
-    def test_heic_preserves_image(self, sample_heic_image: Path) -> None:
-        """Test that setting caption on HEIC doesn't corrupt the image."""
-        with Image.open(sample_heic_image) as img:
-            original_size = img.size
-
-        set_caption(sample_heic_image, "Test caption")
-
-        with Image.open(sample_heic_image) as img:
-            assert img.size == original_size
 
     def test_webp_preserves_image(self, sample_webp_image: Path) -> None:
         """Test that setting caption on WebP doesn't corrupt the image."""
@@ -219,3 +212,143 @@ class TestTimestampFormats:
         width, height = get_image_dimensions(sample_heic_image)
         assert width == 800
         assert height == 600
+
+
+def _decoded(path: Path) -> tuple[str, tuple[int, int], bytes]:
+    """Return the decoded pixel data of an image."""
+    with Image.open(path) as img:
+        return img.mode, img.size, img.tobytes()
+
+
+def _jpeg_scan_data(path: Path) -> bytes:
+    """Return the bytes of a JPEG from the first SOS marker to the end of file."""
+    data = path.read_bytes()
+    pos = 2
+    while data[pos + 1] != 0xDA:
+        pos += 2 + struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+    return data[pos:]
+
+
+def _make_photo_like(temp_dir: Path, name: str, fmt: str, **save_kwargs: object) -> Path:
+    """Create a noisy image, where any re-encode would change pixel values."""
+    noise = Image.effect_noise((320, 240), 40)
+    gradient = Image.linear_gradient("L").resize((320, 240))
+    img = Image.merge("RGB", (noise, gradient, noise.transpose(Image.Transpose.FLIP_LEFT_RIGHT)))
+    if save_kwargs.pop("alpha", False):
+        img.putalpha(gradient)
+    path = temp_dir / name
+    img.save(path, fmt, **save_kwargs)
+    return path
+
+
+class TestLosslessCaptionWrites:
+    """Caption saves must change only metadata, never the image data."""
+
+    @pytest.mark.parametrize(
+        ("name", "fmt", "save_kwargs"),
+        [
+            ("photo.jpg", "JPEG", {"quality": 90}),
+            ("progressive.jpg", "JPEG", {"quality": 90, "progressive": True}),
+            ("photo.png", "PNG", {}),
+            ("lossy.webp", "WEBP", {"quality": 80}),
+            ("lossless.webp", "WEBP", {"lossless": True}),
+            ("alpha.webp", "WEBP", {"quality": 80, "alpha": True}),
+            ("lossless_alpha.webp", "WEBP", {"lossless": True, "alpha": True}),
+            ("photo.tiff", "TIFF", {}),
+            ("lzw.tiff", "TIFF", {"compression": "tiff_lzw"}),
+        ],
+    )
+    def test_repeated_saves_keep_pixels(
+        self, temp_dir: Path, name: str, fmt: str, save_kwargs: dict[str, object]
+    ) -> None:
+        """Test that many caption saves leave the decoded pixels exactly unchanged."""
+        path = _make_photo_like(temp_dir, name, fmt, **save_kwargs)
+        original = _decoded(path)
+
+        for i in range(10):
+            assert set_caption(path, f"Caption {i}") is True
+
+        assert get_caption(path) == "Caption 9"
+        assert _decoded(path) == original
+
+    def test_webp_with_exif_replaced(self, temp_dir: Path) -> None:
+        """Test that an existing WebP EXIF chunk is replaced, not duplicated."""
+        exif = Image.Exif()
+        exif[Base.Make] = "Phone"
+        path = _make_photo_like(temp_dir, "exif.webp", "WEBP", quality=80, exif=exif.tobytes())
+
+        assert set_caption(path, "First") is True
+        assert set_caption(path, "Second") is True
+
+        assert path.read_bytes().count(b"EXIF") == 1
+        assert get_caption(path) == "Second"
+        with Image.open(path) as img:
+            assert img.getexif()[Base.Make] == "Phone"
+
+    def test_jpeg_keeps_scan_data_and_metadata(self, temp_dir: Path) -> None:
+        """Test that JPEG image data, ICC profile and XMP are kept byte for byte."""
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        xmp = b'<x:xmpmeta xmlns:x="adobe:ns:meta/">test</x:xmpmeta>'
+        exif = Image.Exif()
+        exif[Base.Make] = "Phone"
+        path = _make_photo_like(
+            temp_dir, "meta.jpg", "JPEG", quality=90, icc_profile=icc, xmp=xmp, exif=exif.tobytes()
+        )
+        scan = _jpeg_scan_data(path)
+
+        assert set_caption(path, "Kitchen ceiling") is True
+
+        assert _jpeg_scan_data(path) == scan
+        with Image.open(path) as img:
+            assert img.info["icc_profile"] == icc
+            assert img.info["xmp"] == xmp
+            assert img.getexif()[Base.Make] == "Phone"
+        assert get_caption(path) == "Kitchen ceiling"
+
+    def test_jpeg_without_exif_gets_exif(self, temp_dir: Path) -> None:
+        """Test that a JPEG with only a JFIF header gains an EXIF block."""
+        path = _make_photo_like(temp_dir, "jfif.jpg", "JPEG", quality=90)
+        scan = _jpeg_scan_data(path)
+
+        assert set_caption(path, "Added") is True
+
+        assert _jpeg_scan_data(path) == scan
+        assert get_caption(path) == "Added"
+
+    def test_multipage_tiff_refused(self, temp_dir: Path) -> None:
+        """Test that a multi-page TIFF is not re-saved (pages would be lost)."""
+        path = temp_dir / "pages.tiff"
+        Image.new("RGB", (50, 50)).save(
+            path, save_all=True, append_images=[Image.new("RGB", (50, 50))]
+        )
+        original = path.read_bytes()
+
+        assert set_caption(path, "Caption") is False
+        assert path.read_bytes() == original
+
+
+class TestAtomicCaptionWrites:
+    """A failed save must leave the original file untouched."""
+
+    def test_failed_replace_keeps_original(
+        self, sample_image: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that an interrupted replace leaves the original and no temp file."""
+        original = sample_image.read_bytes()
+
+        def fail_replace(*_args: object) -> None:
+            raise OSError("simulated crash")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+
+        assert set_caption(sample_image, "Never written") is False
+        assert sample_image.read_bytes() == original
+        assert sorted(p.name for p in sample_image.parent.iterdir()) == [sample_image.name]
+
+    def test_keeps_file_mode(self, sample_image: Path) -> None:
+        """Test that the file permissions survive the replace."""
+        sample_image.chmod(0o640)
+
+        assert set_caption(sample_image, "Caption") is True
+
+        assert sample_image.stat().st_mode & 0o777 == 0o640

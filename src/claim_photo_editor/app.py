@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -291,6 +291,10 @@ class MainWindow(QMainWindow):
 
     def _on_folder_selected(self, folder_path: Path) -> None:
         """Handle folder selection from sidebar."""
+        # Save any caption still pending in the photo view before switching folders
+        if not self.photo_view.flush_pending_save():
+            return
+
         # Skip if already loading this folder
         if (
             hasattr(self, "_loading_folder_path")
@@ -351,22 +355,20 @@ class MainWindow(QMainWindow):
 
     def _on_photo_selected(self, photo: Photo) -> None:
         """Handle photo selection from grid."""
+        if not self.photo_view.set_photo(photo):
+            return
+
         try:
             self._current_photo_index = self._photos.index(photo)
         except ValueError:
             self._current_photo_index = 0
 
-        self._show_photo_view(photo)
+        self._update_navigation_buttons()
+        self.stack.setCurrentWidget(self.photo_view)
 
     def _show_grid_view(self) -> None:
         """Switch to grid view."""
         self.stack.setCurrentWidget(self.grid_view)
-
-    def _show_photo_view(self, photo: Photo) -> None:
-        """Switch to photo view."""
-        self.photo_view.set_photo(photo)
-        self._update_navigation_buttons()
-        self.stack.setCurrentWidget(self.photo_view)
 
     def _update_navigation_buttons(self) -> None:
         """Update navigation button states."""
@@ -377,11 +379,26 @@ class MainWindow(QMainWindow):
     def _navigate_photo(self, direction: int) -> None:
         """Navigate to previous or next photo."""
         new_index = self._current_photo_index + direction
-        if 0 <= new_index < len(self._photos):
+        if 0 <= new_index < len(self._photos) and self.photo_view.set_photo(
+            self._photos[new_index]
+        ):
             self._current_photo_index = new_index
-            photo = self._photos[new_index]
-            self.photo_view.set_photo(photo)
             self._update_navigation_buttons()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Save any pending caption before the window closes."""
+        if not self.photo_view.flush_pending_save():
+            result = QMessageBox.question(
+                self,
+                "Caption Not Saved",
+                "The caption for the current photo could not be saved.\n\nQuit anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def _on_caption_changed(self, photo: Photo) -> None:
         """Handle caption change from photo view."""

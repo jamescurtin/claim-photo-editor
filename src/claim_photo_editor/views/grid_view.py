@@ -557,6 +557,13 @@ class GridView(QWidget):
         """
         for thumb in self._thumbnails:
             if thumb.photo == photo:
+                # HEIF photos are converted to JPEG on first caption, changing the path
+                path_key = str(photo.path)
+                if self._thumb_by_path.get(path_key) is not thumb:
+                    self._thumb_by_path = {
+                        k: t for k, t in self._thumb_by_path.items() if t is not thumb
+                    }
+                    self._thumb_by_path[path_key] = thumb
                 thumb.refresh()
                 break
 

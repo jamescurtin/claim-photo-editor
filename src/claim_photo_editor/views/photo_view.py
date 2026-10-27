@@ -55,19 +55,19 @@ class PhotoView(QWidget):
 
         close_btn = QPushButton("← Back to Grid")
         close_btn.setStyleSheet(BUTTON_STYLE)
-        close_btn.clicked.connect(self.closed.emit)
+        close_btn.clicked.connect(self._request_close)
         top_bar.addWidget(close_btn)
 
         top_bar.addStretch()
 
         self.prev_btn = QPushButton("← Previous")
         self.prev_btn.setStyleSheet(BUTTON_STYLE)
-        self.prev_btn.clicked.connect(lambda: self.navigate_requested.emit(-1))
+        self.prev_btn.clicked.connect(lambda: self._request_navigate(-1))
         top_bar.addWidget(self.prev_btn)
 
         self.next_btn = QPushButton("Next →")
         self.next_btn.setStyleSheet(BUTTON_STYLE)
-        self.next_btn.clicked.connect(lambda: self.navigate_requested.emit(1))
+        self.next_btn.clicked.connect(lambda: self._request_navigate(1))
         top_bar.addWidget(self.next_btn)
 
         return top_bar
@@ -160,30 +160,58 @@ class PhotoView(QWidget):
         self.caption_input.clearFocus()
         self.setFocus()
 
-    def _auto_save_caption(self) -> None:
-        """Auto-save the caption after typing stops."""
+    def _auto_save_caption(self) -> bool:
+        """Auto-save the caption after typing stops. Returns False if the save failed."""
         if not self._photo:
-            return
+            return True
 
         new_caption = self.caption_input.text().strip()
 
         # Only save if caption actually changed
         if new_caption == self._last_saved_caption:
             self.save_status_label.setText("")
-            return
+            return True
 
         try:
             self._photo.caption = new_caption
             self._last_saved_caption = new_caption
+            # HEIF photos are converted to JPEG on first save, which renames the file
+            self.filename_value.setText(self._photo.name)
             self.caption_changed.emit(self._photo)
             self.save_status_label.setText("Saved")
             self.save_status_label.setStyleSheet("color: #4CAF50; font-size: 12px;")
             # Clear the "Saved" status after a short delay
             QTimer.singleShot(2000, lambda: self.save_status_label.setText(""))
-        except OSError as e:
+            return True
+        except Exception as e:
             self.save_status_label.setText("Error!")
             self.save_status_label.setStyleSheet("color: #f44336; font-size: 12px;")
             print(f"Failed to save caption: {e}")
+            return False
+
+    def flush_pending_save(self) -> bool:
+        """
+        Save a caption edit that is still waiting on the auto-save timer.
+
+        Call before leaving the current photo so a quick navigation cannot drop
+        the edit. Also retries an earlier auto-save that failed.
+
+        Returns:
+            False if the save failed; the caller should stay on this photo.
+        """
+        if self._auto_save_timer:
+            self._auto_save_timer.stop()
+        return self._auto_save_caption()
+
+    def _request_navigate(self, direction: int) -> None:
+        """Navigate to another photo once any pending caption is saved."""
+        if self.flush_pending_save():
+            self.navigate_requested.emit(direction)
+
+    def _request_close(self) -> None:
+        """Return to the grid once any pending caption is saved."""
+        if self.flush_pending_save():
+            self.closed.emit()
 
     def _setup_ui(self) -> None:
         """Set up the UI components."""
@@ -205,16 +233,22 @@ class PhotoView(QWidget):
 
         main_layout.addWidget(self._create_metadata_panel())
 
-    def set_photo(self, photo: "Photo") -> None:
+    def set_photo(self, photo: "Photo") -> bool:
         """
-        Set the photo to display.
+        Set the photo to display, saving any pending caption edit first.
 
         Args:
             photo: The Photo object to display.
+
+        Returns:
+            False if the pending save failed; the current photo stays displayed.
         """
+        if not self.flush_pending_save():
+            return False
         self._photo = photo
         self._full_pixmap = load_pixmap(photo.path)
         self._update_display()
+        return True
 
     def _update_display(self) -> None:
         """Update the display with current photo data."""
@@ -272,11 +306,11 @@ class PhotoView(QWidget):
                 # Clear focus from caption input
                 self.caption_input.clearFocus()
             else:
-                self.closed.emit()
+                self._request_close()
         elif event.key() == Qt.Key.Key_Left and not caption_focused:
-            self.navigate_requested.emit(-1)
+            self._request_navigate(-1)
         elif event.key() == Qt.Key.Key_Right and not caption_focused:
-            self.navigate_requested.emit(1)
+            self._request_navigate(1)
         else:
             super().keyPressEvent(event)
 

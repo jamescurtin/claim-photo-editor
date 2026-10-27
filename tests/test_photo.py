@@ -1,11 +1,14 @@
 """Tests for Photo model."""
 
+import os
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageCms
+from PIL.ExifTags import IFD, Base
 
 from claim_photo_editor.models.photo import Photo
-from claim_photo_editor.utils.exif import set_caption
+from claim_photo_editor.utils.exif import ORIGINALS_DIR_NAME, get_caption, set_caption
 
 
 class TestPhotoInit:
@@ -102,6 +105,100 @@ class TestPhotoCaptionSetter:
         photo.reload()
         # Empty string or None after clearing
         assert not photo.caption or photo.caption == ""
+
+
+class TestHeifConversion:
+    """HEIC/HEIF photos are converted to JPEG once, on the first caption save."""
+
+    @pytest.fixture
+    def iphone_heic(self, temp_dir: Path) -> Path:
+        """Create a HEIC with an ICC profile, a timestamp and a rotation."""
+        path = temp_dir / "IMG_0001.HEIC"
+        exif = Image.Exif()
+        exif[Base.Orientation] = 6
+        exif.get_ifd(IFD.Exif)[Base.DateTimeOriginal] = "2024:06:15 14:30:00"
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        Image.new("RGB", (200, 100), color=(100, 150, 200)).save(
+            path, "HEIF", exif=exif.tobytes(), icc_profile=icc
+        )
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+        return path
+
+    def test_converts_to_jpeg(self, iphone_heic: Path) -> None:
+        """Test that the caption lands in a new JPEG and the original is set aside."""
+        photo = Photo(path=iphone_heic)
+        expected_size = photo.dimensions
+        expected_timestamp = photo.timestamp
+
+        photo.caption = "Water damage"
+
+        assert photo.path == iphone_heic.with_name("IMG_0001.jpg")
+        assert get_caption(photo.path) == "Water damage"
+        assert not iphone_heic.exists()
+        assert (iphone_heic.parent / ORIGINALS_DIR_NAME / "IMG_0001.HEIC").exists()
+
+        with Image.open(photo.path) as img:
+            assert img.format == "JPEG"
+            assert img.size == expected_size
+            assert img.getexif()[Base.Orientation] == 1
+            assert img.info.get("icc_profile")
+        assert photo.path.stat().st_mtime == 1_700_000_000
+
+        photo.reload()
+        assert photo.timestamp == expected_timestamp
+        assert photo.caption == "Water damage"
+
+    def test_later_edits_are_lossless(self, iphone_heic: Path) -> None:
+        """Test that edits after the conversion do not touch the JPEG pixels."""
+        photo = Photo(path=iphone_heic)
+        photo.caption = "First"
+        with Image.open(photo.path) as img:
+            pixels = img.tobytes()
+
+        photo.caption = "Second"
+
+        assert get_caption(photo.path) == "Second"
+        with Image.open(photo.path) as img:
+            assert img.tobytes() == pixels
+
+    def test_original_hidden_from_directory(self, iphone_heic: Path) -> None:
+        """Test that the folder lists the converted photo once."""
+        Photo(path=iphone_heic).caption = "Caption"
+
+        photos = Photo.from_directory(iphone_heic.parent)
+
+        assert [p.name for p in photos] == ["IMG_0001.jpg"]
+
+    def test_name_collision(self, iphone_heic: Path) -> None:
+        """Test that an existing JPEG with the same name (any case) is not overwritten."""
+        existing = iphone_heic.with_name("IMG_0001.JPG")
+        Image.new("RGB", (10, 10)).save(existing, "JPEG")
+        existing_bytes = existing.read_bytes()
+
+        photo = Photo(path=iphone_heic)
+        photo.caption = "Caption"
+
+        assert photo.path.name == "IMG_0001-1.jpg"
+        assert existing.read_bytes() == existing_bytes
+
+    def test_failed_conversion_raises_oserror(
+        self, iphone_heic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a failed conversion keeps the HEIC in place."""
+        original = iphone_heic.read_bytes()
+
+        def fail_replace(*_args: object) -> None:
+            raise OSError("simulated crash")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+        photo = Photo(path=iphone_heic)
+
+        with pytest.raises(OSError, match="Failed to convert"):
+            photo.caption = "Caption"
+
+        assert photo.path == iphone_heic
+        assert iphone_heic.read_bytes() == original
+        assert sorted(p.name for p in iphone_heic.parent.iterdir()) == [iphone_heic.name]
 
 
 class TestPhotoFromDirectory:
